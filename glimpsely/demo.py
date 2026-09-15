@@ -16,8 +16,16 @@ SAMPLES = [
 ]
 
 
-def run_demo(root: Path, repeat_last: bool = False) -> None:
+def demo_config(root: Path) -> Config:
+    """Isolated config: demo NEVER touches production store."""
     cfg = Config.load(root)
+    cfg.db_path = root / "data/demo.db"
+    cfg.media_dir = root / "data/demo_media"
+    return cfg
+
+
+def run_demo(root: Path, repeat_last: bool = False) -> None:
+    cfg = demo_config(root)
     cfg.ensure_dirs()
     store, llm, pusher, engine = build_pipeline(cfg)
     user_id = "demo_user@im.wechat"

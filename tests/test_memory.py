@@ -96,6 +96,16 @@ def test_chat_log_roundtrip(store):
     assert store.history_text("nobody@im.wechat") == ""
 
 
+def test_demo_config_isolation():
+    # pin: demo 数据永远不写进生产库
+    from glimpsely.demo import demo_config
+    root = Path(__file__).resolve().parents[1]
+    cfg = demo_config(root)
+    assert cfg.db_path == root / "data/demo.db"
+    assert cfg.db_path != root / "data/glimpsely.db"
+    assert cfg.media_dir == root / "data/demo_media"
+
+
 def test_coerce_validates():
     rec = _coerce({"kind": "HACK", "title": "x" * 100, "importance": 99,
                    "deadline": "", "entities": "not-a-dict",
