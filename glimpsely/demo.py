@@ -6,7 +6,6 @@ from pathlib import Path
 
 from .bot import build_pipeline, handle_update
 from .config import Config
-from .triggers import compose_digest_text, compose_recommend
 
 SAMPLES = [
     ("text", "今晚8点记得参加线上产品评审会，腾讯会议 428-7721"),
@@ -49,14 +48,14 @@ def run_demo(root: Path, repeat_last: bool = False) -> None:
             print(f"\n📩 [图片转发] {p.name}")
         last = (text, image)
         reply = asyncio.run(handle_update(store, llm, pusher, engine,
-                                          user_id, text, image, tok))
+                                          user_id, text, [image] if image else None, tok))
         print(f"🤖 bot回复: {reply}")
 
     if repeat_last and last:
         text, image = last
         print(f"\n📩 [再次转发] {'同一条文字' if text else '同一张图片'}")
         reply = asyncio.run(handle_update(store, llm, pusher, engine,
-                                          user_id, text, image, tok))
+                                          user_id, text, [image] if image else None, tok))
         print(f"🤖 bot回复: {reply}")
 
     print("\n" + "-" * 62)
@@ -77,10 +76,11 @@ def run_demo(root: Path, repeat_last: bool = False) -> None:
         store.conn.commit()
         asyncio.run(engine.fire_deadlines(user_id))
 
-    print("\n🌙 日报演示：")
-    items = store.events_between("1970-01-01", "2999-12-31")
-    recommend = compose_recommend(store.profile_all(), items, llm)
-    print("  " + compose_digest_text(items, recommend, llm).replace("\n", "\n  "))
+    print("\n🌙 日报演示（v2：基于最近全部内容+OCR生成建议/启发）：")
+    from glimpsely.triggers import compose_daily_report
+    events = store.active_events_recent(3)
+    text = compose_daily_report(events, store.profile_all(), llm, 3)
+    print("  " + text.replace("\n", "\n  "))
 
     store.close()
     print("\n✅ demo 完成（推送以终端打印模拟，真机见 README runbook）")

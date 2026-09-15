@@ -32,6 +32,25 @@ REPAIR_PROMPT = (
     "不要任何其他文字。"
 )
 
+OCR_PROMPT = (
+    "你是OCR引擎。逐字转录图片中的全部文字：保持原始行序与结构，"
+    "不要翻译、不要总结、不要添加任何解释，只输出图片中出现的文字本身。"
+)
+
+
+def build_content(prompt: str, image_paths) -> list[dict]:
+    paths = image_paths if isinstance(image_paths, (list, tuple)) else (
+        [image_paths] if image_paths else [])
+    content: list[dict] = []
+    for p in paths:
+        b64 = base64.b64encode(Path(p).read_bytes()).decode()
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:image/jpeg;base64,{b64}"},
+        })
+    content.append({"type": "text", "text": prompt})
+    return content
+
 
 class LLMError(Exception):
     pass
@@ -41,17 +60,10 @@ class OmlxClient:
     def __init__(self, cfg: Config):
         self.cfg = cfg
 
-    def chat(self, prompt: str, image_path: Path | None = None,
+    def chat(self, prompt: str, image_path=None,
              max_tokens: int | None = None, temperature: float | None = None,
              timeout: float | None = None) -> str:
-        content: list[dict] = []
-        if image_path is not None:
-            b64 = base64.b64encode(Path(image_path).read_bytes()).decode()
-            content.append({
-                "type": "image_url",
-                "image_url": {"url": f"data:image/png;base64,{b64}"},
-            })
-        content.append({"type": "text", "text": prompt})
+        content = build_content(prompt, image_path)
         payload = {
             "model": self.cfg.omlx_model,
             "messages": [{"role": "user", "content": content}],
@@ -76,6 +88,9 @@ class OmlxClient:
             return data["choices"][0]["message"]["content"]
         except (KeyError, IndexError) as e:
             raise LLMError(f"unexpected response: {data}") from e
+
+    def ocr(self, image_path) -> str:
+        return self.chat(OCR_PROMPT, image_path, max_tokens=1400, temperature=0.0)
 
     def understand(self, text: str | None, image_path: Path | None) -> str:
         from datetime import datetime
@@ -155,6 +170,13 @@ def _iter_balanced_json(raw: str):
 def _is_record_shaped(d: dict) -> bool:
     return isinstance(d, dict) and "kind" in d and (
         len(set(d) & SCHEMA_KEYS) >= 3)
+
+
+def safe_ocr(client: "OmlxClient", image_path) -> str | None:
+    try:
+        return (client.ocr(image_path) or "").strip() or None
+    except Exception:  # noqa: BLE001 — OCR 失败不阻断记录
+        return None
 
 
 def extract_json(raw: str) -> dict | None:

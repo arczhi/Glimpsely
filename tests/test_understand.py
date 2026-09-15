@@ -90,3 +90,14 @@ def test_route_semantic_chat():
     d = _route_once("苹果和橙子哪个维生素C含量更高？")
     assert d.skill == "chat"
     assert d.reply_hint != ""
+
+
+def test_receipt_ocr_full_text():
+    from glimpsely.llm import safe_ocr
+    cfg = Config.load(ROOT)
+    client = OmlxClient(cfg)
+    ocr = safe_ocr(client, ROOT / "assets/receipt_shot.png")
+    assert ocr is not None
+    assert "20260915-8823" in ocr or "8823" in ocr
+    assert "宫保鸡丁" in ocr
+    assert "62" in ocr

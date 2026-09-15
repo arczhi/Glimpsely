@@ -106,6 +106,91 @@ def test_demo_config_isolation():
     assert cfg.media_dir == root / "data/demo_media"
 
 
+def test_ocr_text_roundtrip(store):
+    rec = Record(kind="note", title="小票", media_path=None,
+                 ocr_text="订单号: 20260915-8823 宫保鸡丁 x1")
+    eid, is_new = store.save_event(rec)
+    assert is_new
+    row = store.event(eid)
+    assert row["ocr_text"].startswith("订单号")
+
+
+def test_ocr_column_migration(tmp_path):
+    # pin: 旧库（无 ocr_text 列）打开时自动补列
+    import sqlite3
+    legacy = tmp_path / "legacy.db"
+    conn = sqlite3.connect(str(legacy))
+    conn.executescript("""
+    CREATE TABLE events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, kind TEXT, title TEXT,
+      entities_json TEXT, deadline TEXT, importance INTEGER, user_intent TEXT,
+      memory_note TEXT, raw_text TEXT, media_path TEXT, source TEXT
+    );
+    """)
+    conn.execute("INSERT INTO events (ts, kind, title) VALUES ('t1','note','旧记录')")
+    conn.commit()
+    conn.close()
+    s = MemoryStore(legacy)
+    cols = {r[1] for r in s.conn.execute("PRAGMA table_info(events)")}
+    assert "ocr_text" in cols and "forgotten" in cols
+    rows = s.conn.execute("SELECT * FROM events").fetchall()
+    assert len(rows) == 1  # 旧数据完好
+
+
+def test_forget_old_soft_marks(store):
+    from datetime import datetime, timedelta
+    old = (datetime.now() - timedelta(days=5)).isoformat(timespec="seconds")
+    fresh = datetime.now().isoformat(timespec="seconds")
+    store.conn.execute(
+        "INSERT INTO events (ts, kind, title) VALUES (?, 'note', '旧记录')", (old,))
+    store.conn.execute(
+        "INSERT INTO events (ts, kind, title) VALUES (?, 'note', '新记录')", (fresh,))
+    conn_row = store.conn
+    conn_row.commit()
+    n = store.forget_old(ttl_days=3)
+    assert n == 1
+    forgotten = conn_row.execute(
+        "SELECT title FROM events WHERE forgotten=1").fetchall()
+    assert [r["title"] for r in forgotten] == ["旧记录"]
+    # 幂等
+    assert store.forget_old(ttl_days=3) == 0
+
+
+def test_reactivate_reanchors_deadline(store):
+    from datetime import datetime, timedelta
+    ts = (datetime.now() - timedelta(days=6)).isoformat(timespec="seconds")
+    deadline = (datetime.fromisoformat(ts) + timedelta(days=5)).isoformat(timespec="seconds")
+    eid, _ = store.save_event(Record(kind="coupon", title="旧券", deadline=deadline))
+    store.conn.execute("UPDATE events SET ts=? WHERE id=?", (ts, eid))
+    store.conn.commit()
+    store.forget_old(ttl_days=3)
+    assert store.event(eid)["forgotten"] == 1
+
+    before = datetime.now()
+    row = store.reactivate(eid)
+    after = datetime.now()
+    assert row["forgotten"] == 0 and row["forgotten_at"] is None
+    new_dl = datetime.fromisoformat(row["deadline"])
+    expected = before + timedelta(days=5)
+    assert new_dl >= expected - timedelta(seconds=5)
+    assert new_dl <= after + timedelta(days=5) + timedelta(seconds=5)
+
+
+def test_semantic_search_finds_relevant(tmp_path):
+    from glimpsely.memory import MemoryStore as MS
+    s = MS(tmp_path / "vec.db")
+    s.save_event(Record(kind="note", title="瑞幸咖啡优惠券",
+                        memory_note="瑞幸咖啡满30减9.9券", ocr_text="有效期至2026-09-20"))
+    s.save_event(Record(kind="note", title="甜品店蛋糕",
+                        memory_note="一家甜品店的提拉米苏蛋糕", ocr_text="草莓蛋糕"))
+    s.save_event(Record(kind="courier", title="顺丰快递",
+                        memory_note="顺丰快递取件码3002", ocr_text="丰巢"))
+    hits = s.semantic_search("之前记的蛋糕甜品是哪家", k=2)
+    assert len(hits) >= 1
+    assert "蛋糕" in hits[0]["title"] or "甜品" in hits[0]["title"] or \
+        "蛋糕" in (hits[0]["memory_note"] or "")
+
+
 def test_coerce_validates():
     rec = _coerce({"kind": "HACK", "title": "x" * 100, "importance": 99,
                    "deadline": "", "entities": "not-a-dict",

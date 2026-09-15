@@ -26,6 +26,7 @@ class Config:
     media_dir: Path = field(default_factory=lambda: Path("data/media"))
     digest_hour: int = 21
     digest_minute: int = 0
+    memory_ttl_days: int = 3
     push_limit_per_hour: int = 3
     push_daily_cap: int = 15
     llm_max_tokens: int = 800
@@ -44,6 +45,7 @@ class Config:
         c.media_dir = Path(os.environ.get("MEDIA_DIR", str(c.media_dir)))
         c.digest_hour = int(os.environ.get("DIGEST_HOUR", c.digest_hour))
         c.digest_minute = int(os.environ.get("DIGEST_MINUTE", c.digest_minute))
+        c.memory_ttl_days = int(os.environ.get("MEMORY_TTL_DAYS", c.memory_ttl_days))
         c.push_limit_per_hour = int(os.environ.get("PUSH_LIMIT_PER_HOUR", c.push_limit_per_hour))
         c.push_daily_cap = int(os.environ.get("PUSH_DAILY_CAP", c.push_daily_cap))
         c.llm_max_tokens = int(os.environ.get("LLM_MAX_TOKENS", c.llm_max_tokens))

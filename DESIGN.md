@@ -178,3 +178,36 @@ PUSH_LIMIT_PER_HOUR=3
 - ⚠️ 9B 模型 JSON 稳定性（temperature+重试+降级兜底；必要时换云 API 混合）
 - ⚠️ iLink 频率配额未公开（推送限速保守 3/h）
 - 仅 1v1、无群聊（产品上即定位个人助理，不是缺陷）
+
+## 12. 追加设计（v0.2）
+
+### 语义 Skill 路由（skills.py）
+字面命令（/list 等）替换为 LLM 单次路由：record/query/digest/clear/chat 五技能，
+输出 `{skill, record?, reply?}`；对话历史入 `chat_log`，多轮上下文进 prompt。
+纯文本才走路由；图片消息始终逐张记录。
+
+### OCR 全文层
+每张图一次独立 OCR 调用（逐字转录，`enable_thinking` 关闭），存 `events.ocr_text`。
+查询/日报 prompt 携带原文摘录（≤400字/条），对话可引用订单号、金额、菜名等细节。
+
+### 多图与并发
+一条消息多张图：逐张下载（绕过 SDK `download_media` 只取第一张的限制）→
+逐张路由+OCR → 聚合回复「已记下 N 条 ✓」。连续多条消息：handler 立即返回、
+后台任务并发（`asyncio.Semaphore(3)`），DB 操作原子。
+
+### 自然遗忘机制
+`events.forgotten/forgotten_at` 软标记列。调度器每小时扫描，超 `MEMORY_TTL_DAYS`（默认3天）
+标记遗忘（不删除）。提醒/日报/查询默认只看 active。**唤醒**：向量检索命中的遗忘记录
+自动重新激活，deadline 按「原始剩余时长」重新锚定到当前（`reactivate()`）。
+
+### 向量检索（sqlite-vec）
+`event_vecs`（vec0 虚表，512 维 float32），入库时自动索引，启动时回填存量。
+嵌入源：omlx `/v1/embeddings` 若可用则用之；当前无 embedding 模型，兜底为
+本地字符 bigram+词元哈希袋向量（确定性、中文可用，占位实现——将来向 omlx
+装载 bge 系模型即可无缝切换）。查询路径：`answer_query` = 向量检索 top8
+（含遗忘）→ 自动唤醒 → LLM 基于原文作答，回复尾注「已唤醒 N 条」。
+
+### 日报 v2
+`compose_daily_report`：输入=近 TTL 全部 events（含 OCR 原文摘录）+画像，
+输出<=160字（第一句概括 + 2-3条引用具体细节的建议/启发，不流水账）；
+LLM 失败降级为清单+通用建议。

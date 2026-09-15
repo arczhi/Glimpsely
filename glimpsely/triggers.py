@@ -75,6 +75,41 @@ def compose_recommend(profile: dict, recent: list[dict],
         return "💡 今天辛苦了，早点休息。"
 
 
+def compose_daily_report(events: list[dict], profile: dict,
+                         client: OmlxClient | None, ttl_days: int = 3) -> str:
+    """日报 v2：基于最近全部内容（含 OCR 原文）生成贴心建议/灵感启发。"""
+    if not events:
+        return "🌙 记忆这几天很清净～有新鲜事随手转发给我，我帮你记着。"
+    lines = []
+    for ev in events[-10:]:
+        dl = f" 截止:{ev['deadline'][:16]}" if ev.get("deadline") else ""
+        lines.append(f"- [{ev['kind']}] {ev['title']}{dl}")
+        ocr = (ev.get("ocr_text") or "").strip()
+        if ocr:
+            lines.append(f"  原文摘录: {ocr[:250]}")
+    memory_block = "\n".join(lines)
+    facts = {k: v for k, v in profile.items() if not k.startswith("count_")}
+    if client is None:
+        items = "\n".join(f"· {ev.get('title') or ev.get('kind')}" for ev in events[-8:])
+        return f"🌙 最近记忆\n{items}\n\n💡 收藏的券记得过期前用掉，有快递还没取就早点去拿。"
+    prompt = (
+        f"你是用户的朋友兼生活助理，写一份<=160字的中文晚间简报，"
+        "基于以下最近几天的记忆（含截图原文）。要求：\n"
+        "1. 第一句一句带过这段时间记了什么，不要流水账罗列\n"
+        "2. 给出2-3条贴心建议或灵感启发，必须引用具体细节"
+        "（比如快过期的券、没取的快递、重复出现的习惯），像朋友随口聊\n"
+        "3. 不要列表符号，不要标题，直接输出正文\n\n"
+        f"最近记忆（近{ttl_days}天，含OCR原文）：\n{memory_block}\n\n"
+        f"用户画像：{facts or '暂无'}"
+    )
+    try:
+        out = (client.chat(prompt, max_tokens=400, temperature=0.6) or "").strip()
+        return out[:400] if out else "🌙 今天辛苦了。"
+    except Exception:  # noqa: BLE001
+        items = "\n".join(f"· {ev.get('title')}" for ev in events[-8:])
+        return f"🌙 最近记忆\n{items}\n\n💡 记得处理即将到期的事项。"
+
+
 class TriggerEngine:
     def __init__(self, cfg: Config, store: MemoryStore,
                  pusher: Pusher, llm: OmlxClient | None):
@@ -104,13 +139,10 @@ class TriggerEngine:
         return fired
 
     async def fire_daily_digest(self, user_id: str) -> bool:
-        now = datetime.now()
-        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        items = self.store.events_between(day_start.isoformat(timespec="seconds"),
-                                          now.isoformat(timespec="seconds"))
+        events = self.store.active_events_recent(self.cfg.memory_ttl_days)
         profile = self.store.profile_all()
-        recommend = compose_recommend(profile, items, self.llm)
-        text = compose_digest_text(items, recommend, self.llm)
+        text = compose_daily_report(
+            events, profile, self.llm, self.cfg.memory_ttl_days)
         result = await self.pusher.send(user_id, text)
         if result.ok:
             self.store.mark_fired(0, "daily_digest")

@@ -21,6 +21,9 @@ CREATE TABLE IF NOT EXISTS events (
   memory_note TEXT,
   raw_text TEXT,
   media_path TEXT,
+  ocr_text TEXT,
+  forgotten INTEGER DEFAULT 0,
+  forgotten_at TEXT,
   source TEXT DEFAULT 'wechat'
 );
 CREATE INDEX IF NOT EXISTS idx_events_deadline ON events(deadline)
@@ -73,13 +76,16 @@ def _now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
-def fingerprint(text: str | None, media_path: Path | None) -> str:
+def fingerprint(text: str | None, media_path: Path | None,
+                semantic: str = "") -> str:
     h = hashlib.sha256()
     if text:
         h.update(b"T" + text.strip().encode("utf-8"))
     if media_path and media_path.exists():
         h.update(b"M" + str(media_path.stat().st_size).encode())
         h.update(media_path.read_bytes()[:65536])
+    if semantic:
+        h.update(b"S" + semantic.strip().encode("utf-8"))
     return h.hexdigest()
 
 
@@ -90,7 +96,34 @@ class MemoryStore:
         self.conn = sqlite3.connect(str(self.db_path))
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
+        self._migrate()
+        self._init_vec()
         self.conn.commit()
+
+    def _migrate(self) -> None:
+        cols = {r[1] for r in self.conn.execute("PRAGMA table_info(events)")}
+        if "ocr_text" not in cols:
+            self.conn.execute("ALTER TABLE events ADD COLUMN ocr_text TEXT")
+        if "forgotten" not in cols:
+            self.conn.execute(
+                "ALTER TABLE events ADD COLUMN forgotten INTEGER DEFAULT 0")
+        if "forgotten_at" not in cols:
+            self.conn.execute("ALTER TABLE events ADD COLUMN forgotten_at TEXT")
+
+    def _init_vec(self) -> None:
+        """Attach sqlite-vec KNN engine; degrade gracefully if unavailable."""
+        self.has_vec = False
+        try:
+            import sqlite_vec
+            self.conn.enable_load_extension(True)
+            sqlite_vec.load(self.conn)
+            self.conn.enable_load_extension(False)
+            self.conn.execute(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS event_vecs USING vec0("
+                "id integer primary key, embedding float[512])")
+            self.has_vec = True
+        except Exception:  # noqa: BLE001 — 无 vec 引擎时退化为按时间检索
+            self.has_vec = False
 
     def close(self) -> None:
         self.conn.close()
@@ -99,25 +132,67 @@ class MemoryStore:
 
     def save_event(self, rec: Record) -> tuple[int, bool]:
         """Returns (event_id, is_new). Duplicates return existing id."""
-        fp = fingerprint(rec.raw_text, rec.media_path)
+        semantic = " ".join(filter(None, [
+            rec.title, rec.memory_note, rec.ocr_text or "",
+            json.dumps(rec.entities, ensure_ascii=False) if rec.entities else ""]))
+        fp = fingerprint(rec.raw_text, rec.media_path, semantic)
         row = self.conn.execute(
             "SELECT event_id FROM dedupe WHERE hash=?", (fp,)).fetchone()
         if row:
             return int(row["event_id"]), False
         cur = self.conn.execute(
             "INSERT INTO events (ts, kind, title, entities_json, deadline,"
-            " importance, user_intent, memory_note, raw_text, media_path, source)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            " importance, user_intent, memory_note, raw_text, media_path, ocr_text, source)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
             (_now(), rec.kind, rec.title, json.dumps(rec.entities, ensure_ascii=False),
              rec.deadline, rec.importance, rec.user_intent, rec.memory_note,
              rec.raw_text, str(rec.media_path) if rec.media_path else None,
+             rec.ocr_text,
              "demo" if rec.media_path and "assets" in str(rec.media_path) else "wechat"))
         eid = int(cur.lastrowid)
         self.conn.execute(
             "INSERT INTO dedupe (hash, event_id, created_at) VALUES (?,?,?)",
             (fp, eid, _now()))
         self.conn.commit()
+        self._index_embedding(eid, rec)
         return eid, True
+
+    def _index_embedding(self, event_id: int, rec) -> None:
+        from .embeddings import embed_one
+        text = " ".join(filter(None, [
+            rec.title, rec.memory_note, rec.ocr_text or "",
+            json.dumps(rec.entities, ensure_ascii=False)]))
+        try:
+            blob = embed_one(text)
+            self.conn.execute(
+                "INSERT INTO event_vecs (id, embedding) VALUES (?,?)",
+                (event_id, blob))
+        except Exception:  # noqa: BLE001 — 向量索引失败不影响入库
+            pass
+
+    def backfill_embeddings(self) -> int:
+        """为存量事件补建向量索引（幂等，启动时调用）。"""
+        if not self.has_vec:
+            return 0
+        from .embeddings import embed_one
+        missing = self.conn.execute(
+            "SELECT e.id, e.title, e.memory_note, e.ocr_text, e.entities_json"
+            " FROM events e LEFT JOIN event_vecs v ON v.id=e.id"
+            " WHERE v.id IS NULL").fetchall()
+        n = 0
+        for row in missing:
+            text = " ".join(filter(None, [
+                row["title"], row["memory_note"] or "", row["ocr_text"] or "",
+                row["entities_json"] or ""]))
+            try:
+                self.conn.execute(
+                    "INSERT INTO event_vecs (id, embedding) VALUES (?,?)",
+                    (int(row["id"]), embed_one(text)))
+                n += 1
+            except Exception:  # noqa: BLE001
+                pass
+        self.conn.commit()
+        return n
 
     def event(self, event_id: int) -> dict | None:
         row = self.conn.execute(
@@ -131,12 +206,13 @@ class MemoryStore:
         return [dict(r) for r in rows]
 
     def pending_deadlines(self, horizon_hours: float = 26.0) -> list[dict]:
-        """Events with a deadline in (now, now+horizon] and not yet fired as deadline trigger."""
+        """Active events with a deadline in (now, now+horizon] and not yet fired."""
         now = datetime.now()
         until = (now + timedelta(hours=horizon_hours)).isoformat(timespec="seconds")
         rows = self.conn.execute(
             "SELECT * FROM events WHERE deadline IS NOT NULL AND deadline>? "
-            "AND deadline<=? ORDER BY deadline", (now.isoformat(timespec="seconds"), until)
+            "AND deadline<=? AND forgotten=0 ORDER BY deadline",
+            (now.isoformat(timespec="seconds"), until)
         ).fetchall()
         out = []
         for r in rows:
@@ -150,7 +226,71 @@ class MemoryStore:
         until = (now + timedelta(hours=26)).isoformat(timespec="seconds")
         rows = self.conn.execute(
             "SELECT * FROM events WHERE deadline IS NOT NULL AND deadline>? AND deadline<=?"
-            " ORDER BY deadline", (now.isoformat(timespec="seconds"), until)).fetchall()
+            " AND forgotten=0 ORDER BY deadline",
+            (now.isoformat(timespec="seconds"), until)).fetchall()
+        return [dict(r) for r in rows]
+
+    # ---- forgetting ----
+
+    def forget_old(self, ttl_days: int = 3) -> int:
+        """Soft-forget events older than ttl_days; returns newly forgotten count."""
+        cutoff = (datetime.now() - timedelta(days=ttl_days)).isoformat(timespec="seconds")
+        cur = self.conn.execute(
+            "UPDATE events SET forgotten=1, forgotten_at=? "
+            "WHERE forgotten=0 AND ts < ?", (_now(), cutoff))
+        self.conn.commit()
+        return cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+
+    def reactivate(self, event_id: int) -> dict | None:
+        """唤醒遗忘记录：deadline 按原始剩余时长重新锚定到当前。"""
+        row = self.event(event_id)
+        if row is None:
+            return None
+        new_deadline = row.get("deadline")
+        if new_deadline:
+            try:
+                dl = datetime.fromisoformat(new_deadline)
+                ts = datetime.fromisoformat(row["ts"])
+                delta = dl - ts
+                if delta.total_seconds() > 0:
+                    new_deadline = (datetime.now() + delta).isoformat(timespec="seconds")
+            except (ValueError, TypeError):
+                pass
+        self.conn.execute(
+            "UPDATE events SET forgotten=0, forgotten_at=NULL, deadline=? WHERE id=?",
+            (new_deadline, event_id))
+        self.conn.commit()
+        return self.event(event_id)
+
+    def active_events_recent(self, ttl_days: int = 3) -> list[dict]:
+        cutoff = (datetime.now() - timedelta(days=ttl_days)).isoformat(timespec="seconds")
+        rows = self.conn.execute(
+            "SELECT * FROM events WHERE forgotten=0 AND ts>=? ORDER BY ts",
+            (cutoff,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def semantic_search(self, query: str, k: int = 8) -> list[dict]:
+        """向量检索（含遗忘记录）；vec 不可用时退化为最近记录。"""
+        from .embeddings import embed_one
+        if self.has_vec:
+            try:
+                blob = embed_one(query)
+                hits = self.conn.execute(
+                    "SELECT id, distance FROM event_vecs "
+                    "WHERE embedding MATCH ? AND k=? ORDER BY distance",
+                    (blob, k)).fetchall()
+                out = []
+                for h in hits:
+                    row = self.event(int(h["id"]))
+                    if row is not None:
+                        d = dict(row)
+                        d["distance"] = h["distance"]
+                        out.append(d)
+                return out
+            except Exception:  # noqa: BLE001
+                pass
+        rows = self.conn.execute(
+            "SELECT * FROM events ORDER BY ts DESC LIMIT ?", (k,)).fetchall()
         return [dict(r) for r in rows]
 
     # ---- profile ----

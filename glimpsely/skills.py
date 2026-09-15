@@ -73,33 +73,55 @@ async def route(client: OmlxClient, text: str | None,
     return Decision("chat", None, GENERIC_FALLBACK_REPLY)
 
 
-def _format_events(rows: list[dict], limit: int = 12) -> str:
+def _format_events(rows: list[dict], limit: int = 12,
+                   with_ocr: bool = False) -> str:
     lines = []
     for r in rows[-limit:]:
         dl = f" 截止:{r['deadline']}" if r.get("deadline") else ""
-        lines.append(f"- [{r['kind']}] {r['title']} ({r['ts'][:16]}){dl}")
+        line = f"- [{r['kind']}] {r['title']} ({r['ts'][:16]}){dl}"
+        ocr = (r.get("ocr_text") or "").strip()
+        if with_ocr and ocr:
+            line += f"\n  原文: {ocr[:400]}"
+        lines.append(line)
     return "\n".join(lines) if lines else "（记忆库为空）"
 
 
 async def answer_query(client: OmlxClient, question: str,
                        store, user_id: str) -> str:
-    """Two-stage query: deterministic fetch + LLM wording."""
-    all_rows = store.events_between("1970-01-01", "2999-12-31")
+    """向量检索（含遗忘记录）→ 自动唤醒 → LLM 基于原文回答。"""
+    matches = store.semantic_search(question, k=8)
     upcoming = store.upcoming_events_for_digest()
-    memory_block = _format_events(all_rows)
+    awoken = 0
+    for m in matches:
+        if m.get("forgotten"):
+            store.reactivate(int(m["id"]))
+            awoken += 1
+    block_lines = []
+    for m in matches[:8]:
+        dl = f" 截止:{m['deadline'][:16]}" if m.get("deadline") else ""
+        state = "（这条已从遗忘中唤醒）" if m.get("forgotten") else ""
+        block_lines.append(
+            f"- [{m['kind']}] {m['title']} ({m['ts'][:16]}){dl}{state}")
+        ocr = (m.get("ocr_text") or "").strip()
+        if ocr:
+            block_lines.append(f"  原文: {ocr[:400]}")
+    memory_block = "\n".join(block_lines) or "（没找到相关记忆）"
     upcoming_block = _format_events(upcoming)
     prompt = (
         f"{_clock()}\n"
-        f"用户的记忆库（最近记录）：\n{memory_block}\n"
+        f"从用户记忆库里检索到的相关记录（含截图原文）：\n{memory_block}\n"
         f"（即将到期）\n{upcoming_block}\n\n"
         f"用户问题：{question}\n"
-        "基于记忆库回答，<=100字，直接回答不要解释；记忆库里没有的信息就说记库里没有。"
+        "基于检索到的记录回答（可引用原文细节，如订单号、金额、菜名），"
+        "<=120字，直接回答不要解释；没检索到就说记不起来。"
     )
     try:
-        out = await asyncio.to_thread(client.chat, prompt, None, 300, 0.3, None)
-        out = (out or "").strip()
-        if out:
-            return out[:300]
+        out = await asyncio.to_thread(client.chat, prompt, None, 350, 0.3, None)
+        reply = (out or "").strip()
     except Exception:  # noqa: BLE001
-        pass
-    return "最近的记录：\n" + _format_events(all_rows, limit=5)
+        reply = memory_block[:200]
+    if not reply:
+        reply = "记库里没找到相关内容。"
+    if awoken:
+        reply += f"\n（已从遗忘中唤醒 {awoken} 条相关记忆）"
+    return reply[:400]

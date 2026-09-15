@@ -21,6 +21,7 @@ class Record:
     memory_note: str = ""
     raw_text: str | None = None
     media_path: Path | None = None
+    ocr_text: str | None = None
     degraded: bool = False
 
     def to_json(self) -> str:
