@@ -45,6 +45,7 @@ async def handle_update(store: MemoryStore, llm: OmlxClient, pusher: Pusher,
     paths = [Path(p) for p in image_paths] if image_paths else []
 
     # 图片消息：OCR 先行 → 原文喂给 LLM 理解（实体抽取有 ground truth）
+    # 图片消息永远入库（转发图片=记忆动作，不由模型裁量 skill）
     if paths:
         lines: list[str] = []
         briefing = store.briefing()
@@ -59,13 +60,14 @@ async def handle_update(store: MemoryStore, llm: OmlxClient, pusher: Pusher,
                 decision = await route(llm, text, downscale_for_llm(img),
                                        store.history_text(user_id), ocr_text=ocr_text,
                                        briefing=briefing)
-            # 逃生门：模型判断 OCR 零散文字不代表图片主题 → 带图重跑
-            if ocr_rich and decision.needs_vision:
-                decision = await route(llm, text, downscale_for_llm(img),
-                                       store.history_text(user_id), ocr_text=ocr_text)
             rec = decision.record or _fallback(text, img)
             rec.media_path = img
             rec.ocr_text = ocr_text
+            if rec.kind == "note" and (not rec.title or len(rec.title) < 6):
+                # 贫瘠记录兜底：描述性标题优于空泛标题
+                rec.kind = "note"
+                if not rec.title or len(rec.title) < 4:
+                    rec.title = f"[图片] {(ocr_text or img.stem)[:20]}"
             store.save_event(rec)
             store.update_profile_from_record(rec)
             note = (rec.memory_note or rec.title)[:40]

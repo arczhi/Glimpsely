@@ -326,3 +326,35 @@ def test_immediate_advice_daily_cap(tmp_path, monkeypatch):
     ok2 = asyncio.run(engine.fire_immediate_advice("u@im.wechat"))
     assert ok1 is True and ok2 is False
     assert store.fired_today("context") == 1
+
+
+def test_image_message_always_persists(tmp_path, monkeypatch):
+    """pin: 图片消息即使被模型判成 chat，也必须入库（转发=记忆动作）。"""
+    import asyncio
+
+    import glimpsely.bot as bot_mod
+    from glimpsely.bot import handle_update
+    from glimpsely.config import Config
+    from glimpsely.memory import MemoryStore
+    from glimpsely.push import Pusher
+    from glimpsely.triggers import TriggerEngine
+
+    cfg = Config.load(Path(__file__).resolve().parents[1])
+    cfg.db_path = tmp_path / "img.db"
+    cfg.media_dir = tmp_path
+    store = MemoryStore(cfg.db_path)
+    pusher = Pusher(cfg, store, bot=None)
+    engine = TriggerEngine(cfg, store, pusher, None)
+
+    img = tmp_path / "dish.jpg"
+    img.write_bytes(b"\xff\xd8fake")
+    monkeypatch.setattr(bot_mod, "full_ocr", lambda c, p: "川")  # 稀疏 OCR
+    monkeypatch.setattr(bot_mod, "downscale_for_llm", lambda p: Path(p))
+    # 模型判 chat 且无 record（真实事故场景）
+    client = FakeClient(['{"skill":"chat","reply":"看起来不错！"}'])
+    reply = asyncio.run(handle_update(
+        store, client, pusher, engine, "u@im.wechat", None, [img], "tok"))
+    rows = store.events_between("1970-01-01", "2999-12-31")
+    assert len(rows) == 1  # 强制入库
+    assert rows[0]["media_path"] == str(img)
+    assert "已记下" in reply or "[图片]" in reply
