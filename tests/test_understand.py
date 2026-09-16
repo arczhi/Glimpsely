@@ -93,11 +93,19 @@ def test_route_semantic_chat():
 
 
 def test_receipt_ocr_full_text():
-    from glimpsely.llm import safe_ocr
+    from glimpsely.ocr import full_ocr
     cfg = Config.load(ROOT)
     client = OmlxClient(cfg)
-    ocr = safe_ocr(client, ROOT / "assets/receipt_shot.png")
+    ocr = full_ocr(client, ROOT / "assets/receipt_shot.png")
     assert ocr is not None
     assert "20260915-8823" in ocr or "8823" in ocr
     assert "宫保鸡丁" in ocr
     assert "62" in ocr
+
+
+def test_paddle_ocr_deterministic():
+    from glimpsely.ocr import ocr_image_text
+    t1 = ocr_image_text(ROOT / "assets/receipt_shot.png")
+    t2 = ocr_image_text(ROOT / "assets/receipt_shot.png")
+    assert t1 == t2  # 确定性：同图两次结果一致
+    assert t1 and "订单" in t1

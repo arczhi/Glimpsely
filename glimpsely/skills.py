@@ -24,6 +24,8 @@ ROUTER_PROMPT = (
     ' "record":仅record时：{"kind":"courier|bill|coupon|event|address|person|chat_digest|note|other",'
     '"title":"<=30字摘要","entities":{"键":"值"},"deadline":"ISO8601或null(相对时间以当前时间折算)",'
     '"importance":1到5,"user_intent":"<=25字","memory_note":"<=40字"}}\n'
+    "entities 规则：键值必须来自原文，不要自己命名推断；"
+    "时刻（如21:56）和时长（如35分钟）严格区分，键名用「时间」和「时长」区分。\n"
 )
 
 GENERIC_FALLBACK_REPLY = "（本地模型这会儿没响应，稍后再试试）"
@@ -112,8 +114,11 @@ async def answer_query(client: OmlxClient, question: str,
         f"从用户记忆库里检索到的相关记录（含截图原文）：\n{memory_block}\n"
         f"（即将到期）\n{upcoming_block}\n\n"
         f"用户问题：{question}\n"
-        "基于检索到的记录回答（可引用原文细节，如订单号、金额、菜名），"
-        "<=120字，直接回答不要解释；没检索到就说记不起来。"
+        "回答铁律：\n"
+        "1. 只能引用上面记录/原文里明确出现的文字和数字，禁止推算、换算或编造\n"
+        "2. 时间和时长要分清：原文写的是时刻（如21:56）就说是时刻，不是时长\n"
+        "3. 用户问的信息在原文里没有 → 直接说「原文里没记到这个信息」，禁止猜\n"
+        "<=120字，直接回答不要解释。"
     )
     try:
         out = await asyncio.to_thread(client.chat, prompt, None, 350, 0.3, None)

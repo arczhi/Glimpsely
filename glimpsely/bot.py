@@ -33,7 +33,7 @@ async def handle_update(store: MemoryStore, llm: OmlxClient, pusher: Pusher,
 
     image_paths: 单条消息可能含多张图（列表），逐张记录；文本消息则路由语义技能。
     """
-    from .llm import safe_ocr
+    from .ocr import full_ocr
     from .understand import _fallback
 
     if user_id and context_token:
@@ -48,7 +48,7 @@ async def handle_update(store: MemoryStore, llm: OmlxClient, pusher: Pusher,
             decision = await route(llm, text, img, store.history_text(user_id))
             rec = decision.record or _fallback(text, img)
             rec.media_path = img
-            rec.ocr_text = await asyncio.to_thread(safe_ocr, llm, img)
+            rec.ocr_text = await asyncio.to_thread(full_ocr, llm, img)
             store.save_event(rec)
             store.update_profile_from_record(rec)
             note = (rec.memory_note or rec.title)[:40]
