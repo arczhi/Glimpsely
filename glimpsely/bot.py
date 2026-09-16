@@ -10,6 +10,7 @@ from wechat_bot import Filter
 from .config import Config
 from .llm import OmlxClient
 from .memory import MemoryStore
+from .ocr import downscale_for_llm, full_ocr, warmup
 from .push import Pusher
 from .skills import Decision, answer_query, route
 from .triggers import TriggerEngine
@@ -33,7 +34,6 @@ async def handle_update(store: MemoryStore, llm: OmlxClient, pusher: Pusher,
 
     image_paths: 单条消息可能含多张图（列表），逐张记录；文本消息则路由语义技能。
     """
-    from .ocr import full_ocr
     from .understand import _fallback
 
     if user_id and context_token:
@@ -46,7 +46,11 @@ async def handle_update(store: MemoryStore, llm: OmlxClient, pusher: Pusher,
         lines: list[str] = []
         for img in paths:
             ocr_text = await asyncio.to_thread(full_ocr, llm, img)
-            decision = await route(llm, text, img, store.history_text(user_id),
+            rec_img = img
+            # OCR 文字足够丰富时跳过视觉调用（省掉图片 prefill，显著提速）
+            if not (ocr_text and len(ocr_text) >= 80):
+                rec_img = downscale_for_llm(img)
+            decision = await route(llm, text, rec_img, store.history_text(user_id),
                                    ocr_text=ocr_text)
             rec = decision.record or _fallback(text, img)
             rec.media_path = img
@@ -72,7 +76,7 @@ async def handle_update(store: MemoryStore, llm: OmlxClient, pusher: Pusher,
         store.save_event(rec)
         store.update_profile_from_record(rec)
         extra = "\n⏰ 我会在临近时提醒你" if rec.deadline else ""
-        note = rec.memory_note[:40]
+        note = (rec.memory_note or rec.title)[:40]
         return f"{ack}  {note}{extra}" if note else ack
 
     if decision.skill == "query":
@@ -155,6 +159,11 @@ class Glimpsely:
             return Path(path) if path else None
 
         async def _process(ctx):
+            # 立刻给"正在输入"反馈（感知延迟优化，失败不影响主流程）
+            try:
+                await ctx.send_typing()
+            except Exception:
+                logging.getLogger(__name__).debug("typing hint failed", exc_info=True)
             user_id = ctx.message.from_user_id
             tok = ctx.context_token
             text = None
@@ -200,10 +209,12 @@ class Glimpsely:
             t.add_done_callback(tasks_set.discard)
         self.pusher.bot = bot
         sched = asyncio.create_task(self._run_scheduler())
+        warm = asyncio.create_task(asyncio.to_thread(warmup))
         try:
             await bot.run_async()
         finally:
             sched.cancel()
+            warm.cancel()
 
 
 async def amain() -> None:

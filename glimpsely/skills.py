@@ -18,12 +18,11 @@ ROUTER_PROMPT = (
     "- digest：用户想要今日汇总/日报（如：给我发日报、总结一下今天记的）\n"
     "- clear：用户明确要求清空所有记忆（如：忘掉全部记录）\n"
     "- chat：普通聊天或知识提问，与记忆无关\n"
-    '输出格式：\n'
+    '输出格式（精简，别加多余字段）：\n'
     '{"skill":"record|query|digest|clear|chat",\n'
     ' "reply":"仅chat时：一句自然的对话回复(<=80字)",\n'
     ' "record":仅record时：{"kind":"courier|bill|coupon|event|address|person|chat_digest|note|other",'
-    '"title":"<=30字摘要","entities":{"键":"值"},"deadline":"ISO8601或null(相对时间以当前时间折算)",'
-    '"importance":1到5,"user_intent":"<=25字","memory_note":"<=40字"}}\n'
+    '"title":"<=40字摘要","entities":{"键":"值"},"deadline":"ISO8601或null(相对时间以当前时间折算)"}}\n'
     "entities 规则：键值必须来自原文，不要自己命名推断；"
     "时刻（如21:56）和时长（如35分钟）严格区分，键名用「时间」和「时长」区分。\n"
 )

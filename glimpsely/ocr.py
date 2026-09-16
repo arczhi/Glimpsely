@@ -6,6 +6,7 @@ for receipts/screenshots; LLM OCR stays as fallback when Paddle is unavailable.
 
 import logging
 import threading
+from pathlib import Path
 
 from .llm import OmlxClient, safe_ocr
 
@@ -75,6 +76,39 @@ def ocr_image_text(path) -> str | None:
     except Exception:  # noqa: BLE001 — OCR 失败交由调用方兜底
         logging.getLogger(__name__).exception("paddle ocr failed")
         return None
+
+
+def downscale_for_llm(path, max_side: int = 1280):
+    """大图缩到 max_side 内再喂 LLM（省视觉 token）；小图原样返回。"""
+    from PIL import Image
+    path = Path(path)
+    try:
+        with Image.open(path) as im:
+            w, h = im.size
+            if max(w, h) <= max_side:
+                return path
+            im = im.convert("RGB")
+            im.thumbnail((max_side, max_side))
+            out = path.with_name(f"{path.stem}_llm.jpg")
+            im.save(out, quality=85)
+            return out
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).exception("downscale failed")
+        return path
+
+
+def warmup() -> None:
+    """服务启动时预热 Paddle（消除首图冷启动 3s+）。"""
+    try:
+        get_engine()
+        from PIL import Image
+        probe = Image.new("RGB", (64, 32), "white")
+        tmp = Path("/tmp/glimpsely_ocr_probe.png")
+        probe.save(tmp)
+        ocr_image_text(tmp)
+        logging.getLogger(__name__).info("paddle ocr warmed up")
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).exception("paddle warmup failed")
 
 
 def full_ocr(client: OmlxClient | None, image_path) -> str | None:

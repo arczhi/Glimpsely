@@ -109,7 +109,7 @@ def test_build_content_multi_image(tmp_path):
 def test_handle_update_multi_image(tmp_path, monkeypatch):
     import asyncio
 
-    import glimpsely.ocr as ocr_mod
+    import glimpsely.bot as bot_mod
     from glimpsely.bot import handle_update
     from glimpsely.config import Config
     from glimpsely.memory import MemoryStore
@@ -126,8 +126,9 @@ def test_handle_update_multi_image(tmp_path, monkeypatch):
     a.write_bytes(b"\xff\xd8fake-a")
     b = tmp_path / "b.jpg"
     b.write_bytes(b"\xff\xd8fake-b")
-    # OCR 先行：原文先于 route 进入 LLM prompt
-    monkeypatch.setattr(ocr_mod, "full_ocr", lambda client, p: f"OCR:{Path(p).name}")
+    # patch 在使用处（bot 模块的全局绑定）
+    monkeypatch.setattr(bot_mod, "full_ocr", lambda client, p: f"OCR:{Path(p).name}")
+    monkeypatch.setattr(bot_mod, "downscale_for_llm", lambda p: Path(p))
     client = FakeClient([
         # 图1 route -> 图2 route
         '{"skill":"record","record":{"kind":"courier","title":"顺丰SF1",'
@@ -177,3 +178,48 @@ def test_daily_report_v2_with_llm():
          {"kind": "note", "title": "跑步2.67公里", "deadline": None, "ocr_text": "配速8:12"}],
         {}, Fake(), ttl_days=3)
     assert "咖啡券" in out and len(out) < 400
+
+
+def test_downscale_for_llm(tmp_path):
+    from PIL import Image
+
+    from glimpsely.ocr import downscale_for_llm
+    big = tmp_path / "big.jpg"
+    Image.new("RGB", (2400, 1200), "white").save(big)
+    out = downscale_for_llm(big)
+    assert out != big
+    with Image.open(out) as im:
+        assert max(im.size) <= 1280
+    # 小图原样返回
+    small = tmp_path / "small.jpg"
+    Image.new("RGB", (800, 600), "white").save(small)
+    assert downscale_for_llm(small) == small
+
+
+def test_rich_ocr_bypasses_vision(tmp_path, monkeypatch):
+    import asyncio
+
+    import glimpsely.bot as bot_mod
+    from glimpsely.bot import handle_update
+    from glimpsely.config import Config
+    from glimpsely.memory import MemoryStore
+    from glimpsely.push import Pusher
+    from glimpsely.triggers import TriggerEngine
+
+    cfg = Config.load(Path(__file__).resolve().parents[1])
+    store = MemoryStore(tmp_path / "r.db")
+    pusher = Pusher(cfg, store, bot=None)
+    engine = TriggerEngine(cfg, store, pusher, None)
+    img = tmp_path / "doc.jpg"
+    img.write_bytes(b"\xff\xd8fake")
+
+    rich = "长文本截图内容 " * 20  # >= 80 字
+    monkeypatch.setattr(bot_mod, "full_ocr", lambda c, p: rich)
+    client = FakeClient([
+        '{"skill":"record","record":{"kind":"chat_digest","title":"聊天记录",'
+        '"entities":{},"deadline":null}}',
+    ])
+    reply = asyncio.run(handle_update(
+        store, client, pusher, engine, "u@im.wechat", None, [img], "tok"))
+    assert "已记下" in reply
+    assert "截图OCR原文" in client.prompts[0] and "长文本截图内容" in client.prompts[0]
