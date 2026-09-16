@@ -76,10 +76,11 @@ def run_demo(root: Path, repeat_last: bool = False) -> None:
         store.conn.commit()
         asyncio.run(engine.fire_deadlines(user_id))
 
-    print("\n🌙 日报演示（v2：基于最近全部内容+OCR生成建议/启发）：")
+    print("\n🌙 日报演示（v3：一句概括 + 情境信号驱动的建议）：")
     from glimpsely.triggers import compose_daily_report
     events = store.active_events_recent(3)
-    text = compose_daily_report(events, store.profile_all(), llm, 3)
+    signals = store.situation_signals(3)
+    text = compose_daily_report(events, signals, llm, 3)
     print("  " + text.replace("\n", "\n  "))
 
     store.close()

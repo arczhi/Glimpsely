@@ -28,6 +28,10 @@ class Config:
     media_dir: Path = field(default_factory=lambda: Path("data/media"))
     digest_hour: int = 21
     digest_minute: int = 0
+    context_advice_hour: int = 12
+    advice_daily_cap: int = 2
+    push_quiet_hour: int = 22
+    push_wake_hour: int = 8
     memory_ttl_days: int = 3
     push_limit_per_hour: int = 3
     push_daily_cap: int = 15
@@ -53,6 +57,12 @@ class Config:
             c.media_dir = root / c.media_dir
         c.digest_hour = int(os.environ.get("DIGEST_HOUR", c.digest_hour))
         c.digest_minute = int(os.environ.get("DIGEST_MINUTE", c.digest_minute))
+        c.context_advice_hour = int(os.environ.get("CONTEXT_ADVICE_HOUR",
+                                                   c.context_advice_hour))
+        c.advice_daily_cap = int(os.environ.get("ADVICE_DAILY_CAP",
+                                                c.advice_daily_cap))
+        c.push_quiet_hour = int(os.environ.get("PUSH_QUIET_HOUR", c.push_quiet_hour))
+        c.push_wake_hour = int(os.environ.get("PUSH_WAKE_HOUR", c.push_wake_hour))
         c.memory_ttl_days = int(os.environ.get("MEMORY_TTL_DAYS", c.memory_ttl_days))
         c.push_limit_per_hour = int(os.environ.get("PUSH_LIMIT_PER_HOUR", c.push_limit_per_hour))
         c.push_daily_cap = int(os.environ.get("PUSH_DAILY_CAP", c.push_daily_cap))

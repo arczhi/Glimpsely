@@ -205,8 +205,9 @@ class MemoryStore:
             (start_iso, end_iso)).fetchall()
         return [dict(r) for r in rows]
 
-    def pending_deadlines(self, horizon_hours: float = 26.0) -> list[dict]:
-        """Active events with a deadline in (now, now+horizon] and not yet fired."""
+    def pending_deadlines(self, horizon_hours: float = 26.0,
+                          trigger_type: str = "deadline") -> list[dict]:
+        """Active events with a deadline in (now, now+horizon] not yet fired for this stage."""
         now = datetime.now()
         until = (now + timedelta(hours=horizon_hours)).isoformat(timespec="seconds")
         rows = self.conn.execute(
@@ -216,7 +217,7 @@ class MemoryStore:
         ).fetchall()
         out = []
         for r in rows:
-            if self._fired(int(r["id"]), "deadline"):
+            if self._fired(int(r["id"]), trigger_type):
                 continue
             out.append(dict(r))
         return out
@@ -268,6 +269,71 @@ class MemoryStore:
             "SELECT * FROM events WHERE forgotten=0 AND ts>=? ORDER BY ts",
             (cutoff,)).fetchall()
         return [dict(r) for r in rows]
+
+    # ---- 情境信号层（贴心建议的事实来源，纯确定性计算） ----
+
+    def situation_signals(self, ttl_days: int = 3) -> dict:
+        """从记忆库提取可推断的情境信号，供建议引擎挑选。
+
+        全部基于已记录的事实（entities/deadline/kind），不做语义猜测。
+        """
+        now = datetime.now()
+        rows = self.active_events_recent(ttl_days)
+        expiring: list[dict] = []
+        couriers: list[dict] = []
+        coupons: list[dict] = []
+        brands: dict[str, int] = {}
+        for r in rows:
+            if r.get("deadline"):
+                try:
+                    dl = datetime.fromisoformat(r["deadline"])
+                    days = (dl - now).total_seconds() / 86400
+                    if 0 < days <= 3:
+                        expiring.append({
+                            "title": r["title"], "kind": r["kind"],
+                            "deadline": r["deadline"], "days_left": round(days, 1),
+                            "entities": r.get("entities_json"),
+                        })
+                except (ValueError, TypeError):
+                    pass
+            if r["kind"] == "courier":
+                ts = datetime.fromisoformat(r["ts"])
+                if (now - ts).total_seconds() <= 48 * 3600:
+                    couriers.append({"title": r["title"], "ts": r["ts"],
+                                     "entities": r.get("entities_json")})
+            if r["kind"] == "coupon":
+                coupons.append(r)
+            try:
+                ents = json.loads(r.get("entities_json") or "{}")
+                for key in ("品牌", "门店", "店名", "平台"):
+                    v = ents.get(key)
+                    if v:
+                        brands[str(v)] = brands.get(str(v), 0) + 1
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        # 习惯连击：某 kind 连续出现的天数（按自然日）
+        day_kinds: dict[str, set[str]] = {}
+        for r in rows:
+            day = r["ts"][:10]
+            day_kinds.setdefault(r["kind"], set()).add(day)
+        streaks = []
+        for kind, days in day_kinds.items():
+            streak, d = 0, now.date()
+            while d.isoformat() in days:
+                streak += 1
+                d -= timedelta(days=1)
+            if streak >= 3:
+                streaks.append({"kind": kind, "days": streak})
+
+        return {
+            "expiring": sorted(expiring, key=lambda x: x["days_left"]),
+            "couriers": couriers,
+            "coupon_count": len(coupons),
+            "streaks": sorted(streaks, key=lambda x: -x["days"]),
+            "top_brands": sorted(brands.items(), key=lambda kv: -kv[1])[:3],
+            "hour": now.hour,
+        }
 
     def semantic_search(self, query: str, k: int = 8) -> list[dict]:
         """向量检索（含遗忘记录）；vec 不可用时退化为最近记录。"""
@@ -427,6 +493,13 @@ class MemoryStore:
             "SELECT 1 FROM trigger_log WHERE event_id=? AND trigger_type=?",
             (event_id, trigger_type)).fetchone()
         return row is not None
+
+    def fired_today(self, trigger_type: str) -> int:
+        today = datetime.now().strftime("%Y-%m-%d")
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS n FROM trigger_log WHERE trigger_type=?"
+            " AND fired_at LIKE ?", (trigger_type, today + "%")).fetchone()
+        return int(row["n"])
 
     def fired(self, event_id: int, trigger_type: str) -> bool:
         return self._fired(event_id, trigger_type)

@@ -161,7 +161,7 @@ def test_daily_report_v2_composes_advice():
          "ocr_text": "跑步 2.67公里 配速8:12"},
     ]
     out = compose_daily_report(events, {}, None, ttl_days=3)
-    assert "最近记忆" in out
+    assert "近3天记了 2 件" in out  # v3：一句概括
     assert "瑞幸" in out
 
 
@@ -259,3 +259,70 @@ def test_needs_vision_escape_hatch(tmp_path, monkeypatch):
     assert len(client.prompts) == 2          # 两次调用
     assert client.images[0] is None          # 第一次纯文本（快路径）
     assert client.images[1] == img           # 第二次带图
+
+
+def test_two_phase_deadline_trigger(tmp_path):
+    import asyncio
+    from datetime import datetime, timedelta
+
+    from glimpsely.bot import build_pipeline
+    from glimpsely.config import Config
+    from glimpsely.understand import Record
+
+    cfg = Config.load(Path(__file__).resolve().parents[1])
+    cfg.db_path = tmp_path / "t.db"
+    cfg.media_dir = tmp_path
+    store, llm, pusher, engine = build_pipeline(cfg)
+    store.push_state_upsert("u@im.wechat", "tok")
+    # 25h 后截止 → 阶段1首推（记录 deadline），阶段2不动
+    dl1 = (datetime.now() + timedelta(hours=25)).isoformat(timespec="seconds")
+    eid1, _ = store.save_event(Record(kind="coupon", title="首推券", deadline=dl1))
+    fired = asyncio.run(engine.fire_deadlines("u@im.wechat"))
+    assert fired == 1 and store.fired(eid1, "deadline") and not store.fired(eid1, "deadline_soon")
+    # 30 分钟后截止 → 阶段2催办
+    dl2 = (datetime.now() + timedelta(minutes=30)).isoformat(timespec="seconds")
+    eid2, _ = store.save_event(Record(kind="event", title="临期会", deadline=dl2))
+    fired = asyncio.run(engine.fire_deadlines("u@im.wechat"))
+    assert fired == 1 and store.fired(eid2, "deadline_soon")
+    # 幂等：再跑不再推
+    assert asyncio.run(engine.fire_deadlines("u@im.wechat")) == 0
+
+
+def test_quiet_hours_block_nonurgent(tmp_path, monkeypatch):
+    import asyncio
+
+    from glimpsely.bot import build_pipeline
+    from glimpsely.config import Config
+    from glimpsely.triggers import _in_quiet_hour
+    cfg = Config.load(Path(__file__).resolve().parents[1])
+    monkeypatch.setattr(cfg, "push_quiet_hour", 0)
+    monkeypatch.setattr(cfg, "push_wake_hour", 23)  # 全天静默
+    assert _in_quiet_hour(cfg)
+    store, llm, pusher, engine = build_pipeline(cfg)
+    cfg.db_path = tmp_path / "t301.db"
+    cfg.media_dir = tmp_path
+    store.push_state_upsert("u@im.wechat", "tok")
+    assert asyncio.run(engine.fire_context_advice("u@im.wechat")) is False
+
+
+def test_immediate_advice_daily_cap(tmp_path, monkeypatch):
+    import asyncio
+
+    from glimpsely.bot import build_pipeline
+    from glimpsely.config import Config
+    from glimpsely.understand import Record
+    cfg = Config.load(Path(__file__).resolve().parents[1])
+    monkeypatch.setattr(cfg, "advice_daily_cap", 1)
+    monkeypatch.setattr(cfg, "push_quiet_hour", 23)  # 关闭静默干扰
+    cfg.db_path = tmp_path / "t314.db"
+    cfg.media_dir = tmp_path
+    store, llm, pusher, engine = build_pipeline(cfg)
+    store.push_state_upsert("u@im.wechat", "tok")
+    # 种子：囤积信号（近3天3张券）
+    for i in range(3):
+        store.save_event(Record(kind="coupon", title=f"优惠券{i}"))
+    # 预算 1：第一次推成功，第二次被预算拦下
+    ok1 = asyncio.run(engine.fire_immediate_advice("u@im.wechat"))
+    ok2 = asyncio.run(engine.fire_immediate_advice("u@im.wechat"))
+    assert ok1 is True and ok2 is False
+    assert store.fired_today("context") == 1

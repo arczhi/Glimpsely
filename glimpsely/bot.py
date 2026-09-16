@@ -135,6 +135,9 @@ class Glimpsely:
             if now.hour == self.cfg.digest_hour and now.minute < 2:
                 if not self.store.fired(0, "daily_digest"):
                     await self.engine.fire_daily_digest(state_owner)
+            elif now.hour == self.cfg.context_advice_hour and now.minute < 2:
+                if not self.store.fired(0, "context"):
+                    await self.engine.fire_context_advice(state_owner)
             await self.engine.fire_deadlines(state_owner)
 
     async def start(self) -> None:
@@ -226,6 +229,11 @@ class Glimpsely:
                 await ctx.reply(reply)
             except Exception:
                 logging.getLogger(__name__).exception("reply failed")
+            # 入库成功 → 后台评估即时情境建议（不拖慢回复，受每日预算约束）
+            if reply.startswith(ACK_TEXT):
+                advice_task = asyncio.create_task(engine.fire_immediate_advice(user_id))
+                tasks_set.add(advice_task)
+                advice_task.add_done_callback(tasks_set.discard)
 
         @bot.on_message(Filter.text() | Filter.image() | Filter.voice())
         async def _(ctx):
