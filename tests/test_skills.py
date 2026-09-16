@@ -15,9 +15,11 @@ class FakeClient:
 
     def __init__(self, outputs: list[str]):
         self.outputs = list(outputs)
+        self.prompts: list[str] = []
 
     def chat(self, prompt, image_path=None, max_tokens=None,
              temperature=None, timeout=None):
+        self.prompts.append(prompt)
         return self.outputs.pop(0)
 
     def ocr(self, image_path, max_tokens=None, temperature=None):
@@ -104,9 +106,10 @@ def test_build_content_multi_image(tmp_path):
     assert text_only == [{"type": "text", "text": "问？"}]
 
 
-def test_handle_update_multi_image(tmp_path):
+def test_handle_update_multi_image(tmp_path, monkeypatch):
     import asyncio
 
+    import glimpsely.ocr as ocr_mod
     from glimpsely.bot import handle_update
     from glimpsely.config import Config
     from glimpsely.memory import MemoryStore
@@ -123,27 +126,27 @@ def test_handle_update_multi_image(tmp_path):
     a.write_bytes(b"\xff\xd8fake-a")
     b = tmp_path / "b.jpg"
     b.write_bytes(b"\xff\xd8fake-b")
+    # OCR 先行：原文先于 route 进入 LLM prompt
+    monkeypatch.setattr(ocr_mod, "full_ocr", lambda client, p: f"OCR:{Path(p).name}")
     client = FakeClient([
-        # 图1: route -> ocr
+        # 图1 route -> 图2 route
         '{"skill":"record","record":{"kind":"courier","title":"顺丰SF1",'
         '"entities":{},"deadline":null,"importance":3,"user_intent":"记快递",'
         '"memory_note":"顺丰一件"}}',
-        "运单号SF1 取件码3002",
-        # 图2: route -> ocr
         '{"skill":"record","record":{"kind":"note","title":"甜品照片",'
         '"entities":{},"deadline":null,"importance":2,"user_intent":"收藏",'
         '"memory_note":"一家甜品店"}}',
-        "蛋糕 提拉米苏",
     ])
     reply = asyncio.run(handle_update(
         store, client, pusher, engine, "u@im.wechat",
         None, [a, b], "tok"))
     assert "已记下 2 条" in reply
     assert "顺丰一件" in reply and "甜品店" in reply
+    assert "OCR:a.jpg" in client.prompts[0]  # 图1 原文进了第一次 route
+    assert "OCR:b.jpg" in client.prompts[1]  # 图2 原文进了第二次 route
     rows = store.events_between("1970-01-01", "2999-12-31")
     assert len(rows) == 2
-    ocrs = {r["ocr_text"] for r in rows}
-    assert ocrs == {"运单号SF1 取件码3002", "蛋糕 提拉米苏"}
+    assert {r["ocr_text"] for r in rows} == {"OCR:a.jpg", "OCR:b.jpg"}
 
 
 def test_daily_report_v2_composes_advice():

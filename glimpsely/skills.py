@@ -45,11 +45,16 @@ def _clock() -> str:
 
 
 async def route(client: OmlxClient, text: str | None,
-                image_path, history_text: str = "") -> Decision:
+                image_path, history_text: str = "",
+                ocr_text: str | None = None) -> Decision:
     """One LLM call decides skill + optional record + chat reply hint."""
     from pathlib import Path
     image_path = Path(image_path) if image_path else None
     parts = [history_text] if history_text else []
+    if text:
+        parts.append(f"用户消息：{text}")
+    if ocr_text:
+        parts.append(f"截图OCR原文（以此为准，图片仅供补充）：\n{ocr_text[:800]}")
     if text:
         parts.append(f"用户消息：{text}")
     prompt = _clock() + ROUTER_PROMPT + ("\n".join(parts) + "\n" if parts else "")

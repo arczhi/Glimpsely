@@ -41,14 +41,16 @@ async def handle_update(store: MemoryStore, llm: OmlxClient, pusher: Pusher,
 
     paths = [Path(p) for p in image_paths] if image_paths else []
 
-    # 图片消息：逐张处理（并发安全：LLM 调用在 to_thread，DB 原子在循环线程）
+    # 图片消息：OCR 先行 → 原文喂给 LLM 理解（实体抽取有 ground truth）
     if paths:
         lines: list[str] = []
         for img in paths:
-            decision = await route(llm, text, img, store.history_text(user_id))
+            ocr_text = await asyncio.to_thread(full_ocr, llm, img)
+            decision = await route(llm, text, img, store.history_text(user_id),
+                                   ocr_text=ocr_text)
             rec = decision.record or _fallback(text, img)
             rec.media_path = img
-            rec.ocr_text = await asyncio.to_thread(full_ocr, llm, img)
+            rec.ocr_text = ocr_text
             store.save_event(rec)
             store.update_profile_from_record(rec)
             note = (rec.memory_note or rec.title)[:40]
