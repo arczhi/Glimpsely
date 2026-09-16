@@ -120,9 +120,26 @@ class MemoryStore:
             self.conn.enable_load_extension(True)
             sqlite_vec.load(self.conn)
             self.conn.enable_load_extension(False)
+            from .embeddings import detect_dim
+            dim = detect_dim()
+            stored = self.profile_get("_vec_dim")
+            exists = self.conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+                " AND name='event_vecs'").fetchone() is not None
+            if exists and stored and int(stored) != dim:
+                # 嵌入模型切换 → 维度变化 → 重建（启动后 backfill 重新索引）
+                self.conn.execute("DROP TABLE event_vecs")
+                exists = False
+            if exists and not stored:
+                # 旧库无元数据（遗留512表）：当前维度不同则重建
+                if dim != 512:
+                    self.conn.execute("DROP TABLE event_vecs")
+                else:
+                    self.profile_set("_vec_dim", str(dim))
             self.conn.execute(
-                "CREATE VIRTUAL TABLE IF NOT EXISTS event_vecs USING vec0("
-                "id integer primary key, embedding float[512])")
+                f"CREATE VIRTUAL TABLE IF NOT EXISTS event_vecs USING vec0("
+                f"id integer primary key, embedding float[{dim}])")
+            self.profile_set("_vec_dim", str(dim))
             self.has_vec = True
         except Exception:  # noqa: BLE001 — 无 vec 引擎时退化为按时间检索
             self.has_vec = False
@@ -469,7 +486,7 @@ class MemoryStore:
     def briefing(self, max_events: int = 8) -> str:
         """记忆简报：画像事实 + 最近 active 事件一行摘要（注入每次 LLM 调用）。"""
         facts = {k: v for k, v in self.profile_all().items()
-                 if not k.startswith("count_")}
+                 if not k.startswith(("count_", "_"))}
         lines = []
         if facts:
             lines.append("用户画像：" + "；".join(f"{k}={v}" for k, v in facts.items()))

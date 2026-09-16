@@ -24,6 +24,7 @@ class Config:
     omlx_base_url: str = "http://127.0.0.1:8000"
     omlx_api_key: str = "1234"
     omlx_model: str = "Qwen3.5-9B-4bit"
+    omlx_embed_model: str = "bge-m3-mlx-8bit"
     db_path: Path = field(default_factory=lambda: Path("data/glimpsely.db"))
     media_dir: Path = field(default_factory=lambda: Path("data/media"))
     digest_hour: int = 21
@@ -49,6 +50,7 @@ class Config:
         c.omlx_base_url = os.environ.get("OMLX_BASE_URL", c.omlx_base_url)
         c.omlx_api_key = os.environ.get("OMLX_API_KEY", c.omlx_api_key)
         c.omlx_model = os.environ.get("OMLX_MODEL", c.omlx_model)
+        c.omlx_embed_model = os.environ.get("OMLX_EMBED_MODEL", c.omlx_embed_model)
         c.db_path = (root / os.environ.get("DB_PATH", str(c.db_path))).resolve() \
             if not Path(os.environ.get("DB_PATH", str(c.db_path))).is_absolute() \
             else Path(os.environ.get("DB_PATH", str(c.db_path)))
