@@ -16,10 +16,12 @@ class FakeClient:
     def __init__(self, outputs: list[str]):
         self.outputs = list(outputs)
         self.prompts: list[str] = []
+        self.images: list = []
 
     def chat(self, prompt, image_path=None, max_tokens=None,
              temperature=None, timeout=None):
         self.prompts.append(prompt)
+        self.images.append(image_path)
         return self.outputs.pop(0)
 
     def ocr(self, image_path, max_tokens=None, temperature=None):
@@ -223,3 +225,37 @@ def test_rich_ocr_bypasses_vision(tmp_path, monkeypatch):
         store, client, pusher, engine, "u@im.wechat", None, [img], "tok"))
     assert "已记下" in reply
     assert "截图OCR原文" in client.prompts[0] and "长文本截图内容" in client.prompts[0]
+
+
+def test_needs_vision_escape_hatch(tmp_path, monkeypatch):
+    import asyncio
+
+    import glimpsely.bot as bot_mod
+    from glimpsely.bot import handle_update
+    from glimpsely.config import Config
+    from glimpsely.memory import MemoryStore
+    from glimpsely.push import Pusher
+    from glimpsely.triggers import TriggerEngine
+
+    cfg = Config.load(Path(__file__).resolve().parents[1])
+    store = MemoryStore(tmp_path / "v.db")
+    pusher = Pusher(cfg, store, bot=None)
+    engine = TriggerEngine(cfg, store, pusher, None)
+    img = tmp_path / "food.jpg"
+    img.write_bytes(b"\xff\xd8fake")
+
+    # OCR 零散文字（>=80字）但模型判断不代表主题 → needs_vision → 带图重跑
+    monkeypatch.setattr(bot_mod, "full_ocr", lambda c, p: "宫保鸡丁 麻婆豆腐 水煮鱼 优惠 " * 5)
+    monkeypatch.setattr(bot_mod, "downscale_for_llm", lambda p: Path(p))
+    client = FakeClient([
+        '{"skill":"record","needs_vision":true,"record":{"kind":"note","title":"零散文字",'
+        '"entities":{},"deadline":null}}',
+        '{"skill":"record","needs_vision":false,"record":{"kind":"note",'
+        '"title":"三道菜家常餐","entities":{},"deadline":null}}',
+    ])
+    reply = asyncio.run(handle_update(
+        store, client, pusher, engine, "u@im.wechat", None, [img], "tok"))
+    assert "三道菜" in reply
+    assert len(client.prompts) == 2          # 两次调用
+    assert client.images[0] is None          # 第一次纯文本（快路径）
+    assert client.images[1] == img           # 第二次带图

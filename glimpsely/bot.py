@@ -46,12 +46,14 @@ async def handle_update(store: MemoryStore, llm: OmlxClient, pusher: Pusher,
         lines: list[str] = []
         for img in paths:
             ocr_text = await asyncio.to_thread(full_ocr, llm, img)
-            rec_img = img
-            # OCR 文字足够丰富时跳过视觉调用（省掉图片 prefill，显著提速）
-            if not (ocr_text and len(ocr_text) >= 80):
-                rec_img = downscale_for_llm(img)
-            decision = await route(llm, text, rec_img, store.history_text(user_id),
+            ocr_rich = bool(ocr_text and len(ocr_text) >= 80)
+            first_img = None if ocr_rich else downscale_for_llm(img)
+            decision = await route(llm, text, first_img, store.history_text(user_id),
                                    ocr_text=ocr_text)
+            # 逃生门：模型判断 OCR 零散文字不代表图片主题 → 带图重跑
+            if ocr_rich and decision.needs_vision:
+                decision = await route(llm, text, downscale_for_llm(img),
+                                       store.history_text(user_id), ocr_text=ocr_text)
             rec = decision.record or _fallback(text, img)
             rec.media_path = img
             rec.ocr_text = ocr_text

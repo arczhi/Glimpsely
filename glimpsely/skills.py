@@ -21,6 +21,7 @@ ROUTER_PROMPT = (
     '输出格式（精简，别加多余字段）：\n'
     '{"skill":"record|query|digest|clear|chat",\n'
     ' "reply":"仅chat时：一句自然的对话回复(<=80字)",\n'
+    ' "needs_vision":仅当OCR原文零散且明显不代表消息整体内容(如实物照片偶然带出的零散文字)时true，否则false,\n'
     ' "record":仅record时：{"kind":"courier|bill|coupon|event|address|person|chat_digest|note|other",'
     '"title":"<=40字摘要","entities":{"键":"值"},"deadline":"ISO8601或null(相对时间以当前时间折算)"}}\n'
     "entities 规则：键值必须来自原文，不要自己命名推断；"
@@ -35,6 +36,7 @@ class Decision:
     skill: str = "chat"
     record: Record | None = None
     reply_hint: str = ""
+    needs_vision: bool = False
 
 
 def _clock() -> str:
@@ -71,7 +73,8 @@ async def route(client: OmlxClient, text: str | None,
                 rec = _coerce(data, text, image_path)
             if skill == "record" and rec is None:
                 rec = _fallback(text, image_path)
-            return Decision(skill, rec, str(data.get("reply") or "")[:300])
+            return Decision(skill, rec, str(data.get("reply") or "")[:300],
+                            needs_vision=bool(data.get("needs_vision")))
     except Exception:  # noqa: BLE001 — 网络错/超时/解析错统一降级
         pass
     if image_path is not None:
