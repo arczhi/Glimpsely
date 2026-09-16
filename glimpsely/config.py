@@ -4,6 +4,8 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
 
 def _load_env(path: Path) -> None:
     if not path.exists():
@@ -37,14 +39,18 @@ class Config:
 
     @classmethod
     def load(cls, root: Path | None = None) -> "Config":
-        root = root or Path.cwd()
+        root = (root or PROJECT_ROOT).resolve()
         _load_env(root / ".env")
         c = cls()
         c.omlx_base_url = os.environ.get("OMLX_BASE_URL", c.omlx_base_url)
         c.omlx_api_key = os.environ.get("OMLX_API_KEY", c.omlx_api_key)
         c.omlx_model = os.environ.get("OMLX_MODEL", c.omlx_model)
-        c.db_path = Path(os.environ.get("DB_PATH", str(c.db_path)))
+        c.db_path = (root / os.environ.get("DB_PATH", str(c.db_path))).resolve() \
+            if not Path(os.environ.get("DB_PATH", str(c.db_path))).is_absolute() \
+            else Path(os.environ.get("DB_PATH", str(c.db_path)))
         c.media_dir = Path(os.environ.get("MEDIA_DIR", str(c.media_dir)))
+        if not c.media_dir.is_absolute():
+            c.media_dir = root / c.media_dir
         c.digest_hour = int(os.environ.get("DIGEST_HOUR", c.digest_hour))
         c.digest_minute = int(os.environ.get("DIGEST_MINUTE", c.digest_minute))
         c.memory_ttl_days = int(os.environ.get("MEMORY_TTL_DAYS", c.memory_ttl_days))
@@ -55,6 +61,10 @@ class Config:
         c.llm_timeout = float(os.environ.get("LLM_TIMEOUT", c.llm_timeout))
         c.asr_model = Path(os.environ.get("ASR_MODEL", str(c.asr_model)))
         c.asr_tokens = Path(os.environ.get("ASR_TOKENS", str(c.asr_tokens)))
+        if not c.asr_model.is_absolute():
+            c.asr_model = root / c.asr_model
+        if not c.asr_tokens.is_absolute():
+            c.asr_tokens = root / c.asr_tokens
         return c
 
     def ensure_dirs(self) -> None:

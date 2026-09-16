@@ -390,13 +390,29 @@ class MemoryStore:
             " ORDER BY id DESC LIMIT ?", (user_id, limit)).fetchall()
         return [(r["role"], r["content"] or "") for r in reversed(rows)]
 
-    def history_text(self, user_id: str, limit: int = 6) -> str:
+    def history_text(self, user_id: str, limit: int = 8) -> str:
         turns = self.recent_turns(user_id, limit)
         if not turns:
             return ""
         return "最近对话（供参考）：\n" + "\n".join(
             f"{'用户' if role == 'user' else '助理'}：{c[:80]}"
             for role, c in turns)
+
+    def briefing(self, max_events: int = 8) -> str:
+        """记忆简报：画像事实 + 最近 active 事件一行摘要（注入每次 LLM 调用）。"""
+        facts = {k: v for k, v in self.profile_all().items()
+                 if not k.startswith("count_")}
+        lines = []
+        if facts:
+            lines.append("用户画像：" + "；".join(f"{k}={v}" for k, v in facts.items()))
+        rows = self.conn.execute(
+            "SELECT kind, title, ts FROM events WHERE forgotten=0"
+            " ORDER BY ts DESC LIMIT ?", (max_events,)).fetchall()
+        if rows:
+            lines.append("已记录的记忆（最近优先，可直接引用）：")
+            for r in reversed(rows):
+                lines.append(f"- [{r['kind']}] {r['title']} ({r['ts'][:16]})")
+        return "\n".join(lines)
 
     # ---- trigger log ----
 

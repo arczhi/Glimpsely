@@ -47,12 +47,18 @@ async def handle_update(store: MemoryStore, llm: OmlxClient, pusher: Pusher,
     # 图片消息：OCR 先行 → 原文喂给 LLM 理解（实体抽取有 ground truth）
     if paths:
         lines: list[str] = []
+        briefing = store.briefing()
         for img in paths:
             ocr_text = await asyncio.to_thread(full_ocr, llm, img)
             ocr_rich = bool(ocr_text and len(ocr_text) >= 80)
             first_img = None if ocr_rich else downscale_for_llm(img)
             decision = await route(llm, text, first_img, store.history_text(user_id),
-                                   ocr_text=ocr_text)
+                                   ocr_text=ocr_text, briefing=briefing)
+            # 逃生门：模型判断 OCR 零散文字不代表图片主题 → 带图重跑
+            if ocr_rich and decision.needs_vision:
+                decision = await route(llm, text, downscale_for_llm(img),
+                                       store.history_text(user_id), ocr_text=ocr_text,
+                                       briefing=briefing)
             # 逃生门：模型判断 OCR 零散文字不代表图片主题 → 带图重跑
             if ocr_rich and decision.needs_vision:
                 decision = await route(llm, text, downscale_for_llm(img),
@@ -72,9 +78,9 @@ async def handle_update(store: MemoryStore, llm: OmlxClient, pusher: Pusher,
             return f"{ack}  {lines[0][2:]}{extra}" if lines[0].startswith("· ") else f"{ack}  {lines[0]}{extra}"
         return f"已记下 {len(lines)} 条 ✓\n" + "\n".join(lines)
 
-    # 纯文本消息：语义路由
+    # 纯文本消息：语义路由（带记忆简报——chat 路径也知道自己记过什么）
     decision: Decision = await route(
-        llm, text, None, store.history_text(user_id))
+        llm, text, None, store.history_text(user_id), briefing=store.briefing())
 
     if decision.skill == "record" and decision.record is not None:
         rec = decision.record

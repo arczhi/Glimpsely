@@ -26,6 +26,8 @@ ROUTER_PROMPT = (
     '"title":"<=40字摘要","entities":{"键":"值"},"deadline":"ISO8601或null(相对时间以当前时间折算)"}}\n'
     "entities 规则：键值必须来自原文，不要自己命名推断；"
     "时刻（如21:56）和时长（如35分钟）严格区分，键名用「时间」和「时长」区分。\n"
+    "对话铁律：简报里的记忆和画像可以自然引用；涉及过去内容的问题如果 skill 是 chat，"
+    "先考虑改判 query；不知道就直说，禁止编造。\n"
 )
 
 GENERIC_FALLBACK_REPLY = "（本地模型这会儿没响应，稍后再试试）"
@@ -47,11 +49,16 @@ def _clock() -> str:
 
 async def route(client: OmlxClient, text: str | None,
                 image_path, history_text: str = "",
-                ocr_text: str | None = None) -> Decision:
+                ocr_text: str | None = None,
+                briefing: str = "") -> Decision:
     """One LLM call decides skill + optional record + chat reply hint."""
     from pathlib import Path
     image_path = Path(image_path) if image_path else None
-    parts = [history_text] if history_text else []
+    parts = []
+    if briefing:
+        parts.append(briefing)
+    if history_text:
+        parts.append(history_text)
     if text:
         parts.append(f"用户消息：{text}")
     if ocr_text:

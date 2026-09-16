@@ -233,3 +233,28 @@ def test_extract_json_prefers_record_over_inner_dicts():
            '{"kind": "bill", "title": "水电费", "entities": {}, "deadline": null,'
            ' "importance": 2, "user_intent": "记账", "memory_note": "水电费"}')
     assert extract_record(raw)["kind"] == "bill"
+
+
+def test_briefing_includes_profile_and_events(store):
+    from glimpsely.understand import Record as R
+    store.save_event(R(kind="courier", title="顺丰快递一件", memory_note="顺丰"))
+    store.profile_set("常去健身房", "星河店")
+    b = store.briefing(max_events=5)
+    assert "顺丰快递一件" in b and "[courier]" in b
+    assert "常去健身房=星河店" in b
+
+
+def test_briefing_empty(store):
+    assert store.briefing() == ""
+
+
+def test_config_paths_anchor_to_project_root(tmp_path, monkeypatch):
+    # pin: 从任何 cwd 启动，DB 都锚定项目根（防"重启丢记忆"类 bug）
+    from glimpsely.config import Config
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("DB_PATH", raising=False)
+    monkeypatch.delenv("MEDIA_DIR", raising=False)
+    cfg = Config.load()
+    assert cfg.db_path.name == "glimpsely.db"
+    assert "data" in str(cfg.db_path)
+    assert cfg.db_path.is_absolute()
