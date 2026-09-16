@@ -39,10 +39,6 @@ def main() -> int:
     cfg = Config.load(ROOT)
     store = MemoryStore(cfg.db_path)
 
-    from wechat_bot import Bot  # noqa: E402
-    bot = Bot()  # auto-load persisted credentials
-    pusher = Pusher(cfg, store, bot=bot)
-
     rows = store.conn.execute(
         "SELECT user_id FROM push_state WHERE alive=1 "
         "ORDER BY last_seen_at DESC LIMIT 1").fetchall()
@@ -50,8 +46,17 @@ def main() -> int:
         print("push_state 为空：请先真机扫码登录并互发一条消息（见 README runbook）")
         return 1
     user_id = rows[0]["user_id"]
-    if user_id.startswith("demo_user"):
-        print("数据库里只有 demo 数据，请真机发一条消息后再挂长测")
+    # 锚定真实登录 owner：防止测试/demo 污染行导致心跳发错人
+    try:
+        owner = json.loads((Path.home() / ".wechat_bot/current_user.json")
+                           .read_text()).get("user_id")
+        if owner and owner in [r["user_id"] for r in store.conn.execute(
+                "SELECT user_id FROM push_state")]:
+            user_id = owner
+    except (OSError, json.JSONDecodeError):
+        pass
+    if "@" not in user_id or user_id.startswith(("u@", "demo_user")):
+        print(f"疑似污染的 push_state（{user_id}），请真机互发一条消息后再挂长测")
         return 1
 
     log({"event": "watch_start", "user_id": user_id, "hours": args.hours})
@@ -60,6 +65,9 @@ def main() -> int:
     beat = 0
     while time.time() < end:
         beat += 1
+        # 每次 beat 全新 Bot/loop：避免 httpx 连接池绑定已关闭的 event loop
+        from wechat_bot import Bot  # noqa: E402
+        pusher = Pusher(cfg, store, bot=Bot())
         r = asyncio.run(pusher.send(user_id, f"💓 心跳 #{beat}（token 长测）"))
         rec = {"event": "heartbeat", "beat": beat, "ok": r.ok, "reason": r.reason}
         if not r.ok and "-14" in r.reason and first_dead is None:
