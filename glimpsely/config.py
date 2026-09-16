@@ -32,6 +32,8 @@ class Config:
     llm_max_tokens: int = 800
     llm_temperature: float = 0.1
     llm_timeout: float = 180.0
+    asr_model: Path = field(default_factory=lambda: Path("models/sensevoice/model.int8.onnx"))
+    asr_tokens: Path = field(default_factory=lambda: Path("models/sensevoice/tokens.txt"))
 
     @classmethod
     def load(cls, root: Path | None = None) -> "Config":
@@ -51,6 +53,8 @@ class Config:
         c.llm_max_tokens = int(os.environ.get("LLM_MAX_TOKENS", c.llm_max_tokens))
         c.llm_temperature = float(os.environ.get("LLM_TEMPERATURE", c.llm_temperature))
         c.llm_timeout = float(os.environ.get("LLM_TIMEOUT", c.llm_timeout))
+        c.asr_model = Path(os.environ.get("ASR_MODEL", str(c.asr_model)))
+        c.asr_tokens = Path(os.environ.get("ASR_TOKENS", str(c.asr_tokens)))
         return c
 
     def ensure_dirs(self) -> None:

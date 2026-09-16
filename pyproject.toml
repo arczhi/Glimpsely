@@ -8,6 +8,11 @@ dependencies = [
     "apscheduler>=3.11",
     "httpx>=0.27",
     "pillow>=12.0",
+    "sherpa-onnx>=1.13",   # pip 需官方源: pip install -i https://pypi.org/simple sherpa-onnx
+    "pilk>=0.2",           # 微信语音 silk 解码
+    "sqlite-vec>=0.1",
+    "paddlepaddle>=3.0",
+    "paddleocr>=3.7",
 ]
 
 [tool.ruff]

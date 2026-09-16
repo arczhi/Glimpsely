@@ -7,6 +7,9 @@ from pathlib import Path
 from wechat_bot import Bot as WeChatBot
 from wechat_bot import Filter
 
+from .asr import available as asr_available
+from .asr import transcribe as asr_transcribe
+from .asr import warmup as asr_warmup
 from .config import Config
 from .llm import OmlxClient
 from .memory import MemoryStore
@@ -170,6 +173,7 @@ class Glimpsely:
             tok = ctx.context_token
             text = None
             image_paths: list[Path] = []
+            voice_paths: list[Path] = []
             if ctx.message.item_list:
                 for it in ctx.message.item_list:
                     if it.type == 1 and it.text_item:
@@ -182,13 +186,33 @@ class Glimpsely:
                         except Exception:
                             logging.getLogger(__name__).exception(
                                 "download failed for msg %s item", ctx.message.message_id)
+                    elif it.type == 3 and it.voice_item:
+                        try:
+                            p = await _download_image(ctx, it)
+                            if p:
+                                voice_paths.append(p)
+                        except Exception:
+                            logging.getLogger(__name__).exception(
+                                "voice download failed for msg %s", ctx.message.message_id)
+            # 语音 → 本地 ASR → 文字（并入消息文本）
+            for vp in voice_paths:
+                if asr_available(self.cfg):
+                    asr_text = await asyncio.to_thread(asr_transcribe, self.cfg, vp)
+                    if asr_text:
+                        text = (text or "") + (asr_text or "")
+                        logging.getLogger(__name__).info("asr ok: %s", asr_text[:50])
+                else:
+                    logging.getLogger(__name__).warning("voice received but asr model missing")
             if text and text.strip() in ("/digest", "日报"):
                 ok = await engine.fire_daily_digest(user_id)
                 reply = "日报已发送 ✓" if ok else "日报发送失败：会话可能已过期，请随便发条消息恢复"
-            elif text is None and not image_paths:
+            elif text is None and not image_paths and not voice_paths:
                 return  # 空更新/未支持类型，静默跳过，不打扰用户
+            elif text is None and voice_paths and not image_paths:
+                reply = "这条语音没听清，再说一遍？"
             else:
-                store.add_chat_turn(user_id, "user", text or f"[图片×{len(image_paths)}]")
+                store.add_chat_turn(user_id, "user",
+                                    text or f"[图片×{len(image_paths)}]" or "[语音]")
                 reply = await handle_update(store, llm, self.pusher, engine,
                                             user_id, text or None, image_paths, tok)
                 store.add_chat_turn(user_id, "assistant", reply[:200])
@@ -197,7 +221,7 @@ class Glimpsely:
             except Exception:
                 logging.getLogger(__name__).exception("reply failed")
 
-        @bot.on_message(Filter.text() | Filter.image())
+        @bot.on_message(Filter.text() | Filter.image() | Filter.voice())
         async def _(ctx):
             async def _guarded():
                 async with sem:
@@ -212,11 +236,13 @@ class Glimpsely:
         self.pusher.bot = bot
         sched = asyncio.create_task(self._run_scheduler())
         warm = asyncio.create_task(asyncio.to_thread(warmup))
+        warm2 = asyncio.create_task(asyncio.to_thread(asr_warmup, self.cfg))
         try:
             await bot.run_async()
         finally:
             sched.cancel()
             warm.cancel()
+            warm2.cancel()
 
 
 async def amain() -> None:
